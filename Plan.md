@@ -1,6 +1,7 @@
 # Problem
 As of today (29/04/2026), drones pose a threat on soldiers and civilians due to their cost/effect ratio and the difficulty to counter against them.
 They are hard to counter for a number of reasons:
+
 Detection:
 1. Small Profile - Sonar-based radars have trouble detecting small objects, and even if they succeed, they frequently get false-positives. Image based detections have a lot of noise and have trouble detecting small objects (max 2x2 meter object at height in the sky).
 2. No Heat Signature - Due to their electronic-based propellor rotation (the main propulsion), they create minimal heat and therefore are hard to detect with thermal radars.
@@ -35,6 +36,7 @@ Neutralization:
 # Plan
 Sound-Based Detection Based On Classification And Triangulation.
 The easiest, fastest, cheapest and most effective product. POC can be done pretty quickly.
+Might be slightly in-accurate, but can guide more precise radars to the area.
 If doesn't succeed, can be great for resume and self development.
 
 ## POC Compromises
@@ -45,9 +47,9 @@ If doesn't succeed, can be great for resume and self development.
 
 ## Software
 ### Model Training (The Hard Part)
-1. Gather as many examples of drone sounds as possible, ideally with classification of their type, and sounds that sound like drones (Tank, plane, bugs)
+1. Gather as many examples of drone sounds as possible, ideally with real-time DISTANCE in line with audio, classification of their type, and sound-like drones (Tank, plane, bugs)
 2. Create database to train model
-3. Train model for classification (priority order: Drone or not, type of drone, type of propellors)
+3. Train model for classification (priority order: Drone or not, distance, type of drone, type of propellors)
 4. Test model
 
 ### Microphone Data
@@ -70,7 +72,11 @@ If doesn't succeed, can be great for resume and self development.
 
 # Team
 Raz - Team Leader
+
 Ben - Electrical Engineer
+
 Guy - Military Communicator, Cyber Specialist and Developer
+
 Matan - Mathematician
+
 Almog - Low-Level Software Engineer (Optional)
