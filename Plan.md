@@ -12,25 +12,26 @@ Detection:
 Neutralization:
 Due to their small profile and versatile movement, even if detected, they are hard to take down.
 1. RF-Based Jamming - Requires knowing exactly on what frequency the drone is transmitting/receiving on and also requires the capability to jam on that frequency.
-2. Electro-pulse - Requires the capability of sending an electro pulse in a specific direction (expensive equipment and requires high degree of engineering)
+2. EMP (Electro Magnetic Pulse) - Requires the capability of sending an electro pulse in a specific direction (expensive equipment and requires high degree of engineering)
 3. Physical - Hitting the drone physically requires precise aiming, whether it be by drone, net or bullets. The further the drone, the harder it gets.
 
 
-# Solution
+# Solutions
 In this project, we'll take a look at multiple solutions to multiple problems.
 
-Detection:
+## Detection:
 1. Sound-Based Detection Based On Classification And Triangulation
   Can work in bad weather, Cheap. Requires training a classification model for drones (the hard part). Creating a tower and RX/TX protocol to receive all microphones (may already exist).
 2. Microphone Array
   Image which shows where in the image the sound is coming from while looking in the direction (gives only 1 vector. should be paired with other detectors, if used)
 
 
-Neutralization:
+## Neutralization:
 1. M203 Shell Casing Net
-  Good for close range, can be easily and quickly shot, and can be equipped on any soldier. Light-weight, cheap.
+  Good for close range, can be easily and quickly shot, and can be equipped on any soldier. Light-weight, cheap. Requires soldier's knowledge of drone location, good and fast aiming.
 2. RF-Jamming
   Can take down drones from far away and probably be activated at all times. Requires knowing enemy drone frequencies and is limited to remote-controlled drones.
+3. EMP (Electro Magnetic Pulse) - Sending an electro magnetic pulse in a specific direction. Can take down multiple drones at once. Very expensive to create, and requires high quality engineering. Has been created by US company "Epirus"
 
 
 # Plan
@@ -38,6 +39,11 @@ Sound-Based Detection Based On Classification And Triangulation.
 The easiest, fastest, cheapest and most effective product. POC can be done pretty quickly.
 Might be slightly in-accurate, but can guide more precise radars to the area.
 If doesn't succeed, can be great for resume and self development.
+
+# Goal (POC)
+Droppable microphone capsules that can be dropped by a drone and open up upon landing with a solar panel.
+They record audio and livestream it back to command where it gets processed and classified.
+The result should be a position or area where there is a drone.
 
 ## POC Compromises
 - Digital microphones instead of analog: signals already developed. Takes away the hassle of engineering a custom PCB
@@ -47,10 +53,11 @@ If doesn't succeed, can be great for resume and self development.
 
 ## Software
 ### Model Training (The Hard Part)
-1. Gather as many examples of drone sounds as possible, ideally with real-time DISTANCE in line with audio, classification of their type, and sound-like drones (Tank, plane, bugs)
-2. Create database to train model
-3. Train model for classification (priority order: Drone or not, distance, type of drone, type of propellors)
-4. Test model
+1. Find a way to measure and record precise distance between microphone and drone, either by GPS on both devices, communication devices that base distance by signal strength/time or radar
+2. Gather as many examples of drone sounds as possible, ideally with real-time DISTANCE in line with audio, classification of their type, and sound-like drones (Tank, plane, bugs)
+3. Create database to train model
+4. Train model for classification (priority order: Drone or not, distance, type of drone, type of propellors)
+5. Test model
 
 ### Microphone Data
 1. Plan structure of how data will be received from microphones
