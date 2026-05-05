@@ -460,6 +460,29 @@ If cellular is unavailable and some capsules are beyond 20 km, an intermediate c
 
 ## Hardware Shopping List
 
+### Capsule Compute Architecture
+
+Each capsule needs a processor to handle audio capture and either run inference or stream audio. Two approaches:
+
+**Architecture A — Edge Inference**
+- Each capsule: mic + **Raspberry Pi** + GPS + barometer
+- The Pi runs the full CNN-BiLSTM inference pipeline locally
+- Capsule is fully independent — continues working even if the radio link drops
+- Cost: ~$80/capsule for compute; power draw ~800 mA (needs a larger solar panel)
+- **Recommended for Track B** — field deployment requires independence
+
+**Architecture B — Central Inference**
+- Each capsule: mic + **ESP32-S3** + GPS + barometer
+- The ESP32-S3 captures audio via I²S and streams it over WiFi or serial radio to a central Raspberry Pi at the command post
+- The central Pi runs inference for all capsules
+- Cost: ~$12/capsule for compute; power draw ~80–120 mA (much smaller solar panel)
+- Tradeoff: if the radio link drops, that capsule goes silent; the central Pi is a single point of failure
+- **Recommended for Track A POC** — cheaper, faster to wire up, audio lands on your laptop immediately
+
+**Recommendation:** Build Track A with Architecture B (ESP32-S3 capsules → central Pi). Once the model is working and you move to Track B field deployment, switch to Architecture A (RPi per capsule) for independence.
+
+---
+
 ### Quick Reference Checklist
 
 **Microphones**
@@ -478,6 +501,12 @@ If cellular is unavailable and some capsules are beyond 20 km, an intermediate c
 
 **Wind Protection**
 - [ ] [Foam microphone windscreen (open-cell foam, lavalier/miniature mic size) — pack of 10, ~$10](#7-windscreen-deadcat)
+
+**Capsule Compute — Architecture B (Track A POC)**
+- [ ] [ESP32-S3-DevKitC-1 × 3 — official Espressif dev board (~$12 each)](#8-capsule-compute--esp32-s3-architecture-b)
+
+**Capsule Compute — Architecture A (Track B deployment)**
+- [ ] Raspberry Pi 5 × 3 (~$80 each) — not yet needed; buy when moving to Track B field deployment
 
 **Long-Range Radio (post-POC deployment)**
 - [ ] [RFD900x radio modem pair — for km-range RTK correction link in field deployment (~$200–250/pair)](#5-rtk-correction-radio-link--sik-915-mhz-recording--rfd900x-deployment)
@@ -641,6 +670,30 @@ Open-cell foam lets sound through while blocking wind turbulence against the mem
 - [Gemini research plan (this project) — deadcat recommendation for microphone wind protection](gemini%20plan.md)
 - Search "lavalier microphone foam windscreen" on Amazon — no single authoritative product page; verified by general audio field recording best practices.
 
+---
+
+#### 8. Capsule Compute — ESP32-S3 (Architecture B)
+
+The standard ESP32 has 520 KB of SRAM — enough for FFT and simple DSP, but not for loading a CNN model (even quantized models are tens of MB). The **ESP32-S3** is the correct variant: it supports up to 8 MB external PSRAM (on the N8R8 module), has a faster 240 MHz Xtensa LX7 dual-core CPU, and includes native I²S peripheral support for the MEMS microphone.
+
+**Role in Architecture B:** The ESP32-S3 handles audio capture (I²S → ICS-43434), optionally runs a lightweight VAD (Voice Activity Detector) to avoid streaming silence, and transmits the audio stream over WiFi or serial radio to the central Raspberry Pi. The Pi does all inference.
+
+**Recommended board for POC:** ESP32-S3-DevKitC-1 (official Espressif development board, ~$12). Compact, well-documented, USB-C, I²S pins exposed.
+
+**For production capsule hardware:** ESP32-S3-WROOM-1 N8R8 bare module (~$3–5) — 8 MB flash + 8 MB PSRAM variant. Requires soldering to a custom PCB but is much smaller and lighter.
+
+**What to look out for when buying:**
+- **Buy the N8R8 variant** (N8 = 8 MB flash, R8 = 8 MB PSRAM) — the base N8 has no PSRAM and is insufficient. Check the exact part number before ordering.
+- Verify I²S pin availability on the specific board — the DevKitC-1 exposes all I²S pins; some compact ESP32-S3 boards route them elsewhere
+- Power draw ~80–120 mA active at 240 MHz, drops to <1 mA in deep sleep — very solar-friendly
+- If using WiFi for audio streaming: range is limited to ~100–200 m outdoors. For longer range, use a serial radio (SiK or RFD900x) for audio stream transport instead
+- This item is **not needed** if you build Architecture A (Raspberry Pi per capsule) from the start
+
+**Sources:**
+- [ESP32-S3 datasheet — Espressif](https://www.espressif.com/en/products/socs/esp32-s3)
+- [ESP32-S3-DevKitC-1 product page — Espressif](https://www.espressif.com/en/development-tools/esp32-s3-devkitc-1)
+- [ESP32-S3-WROOM-1 module datasheet — Espressif](https://www.espressif.com/sites/default/files/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf)
+
 
 ---
 
@@ -664,6 +717,8 @@ Example: YAMNet backbone → 1024-dim audio embedding → Head 1 (classification
 
 ### Model Quantization
 Neural network weights are normally stored as 32-bit floating point numbers (FP32) — 4 bytes each. INT8 quantization converts them to 8-bit integers — 1 byte each, 4× smaller.
+
+**This is a software-only step — it requires no special hardware purchase.** It runs on any CPU, though chips with dedicated INT8 acceleration (ARM NEON on Raspberry Pi, Google Coral TPU) give larger speedups.
 
 Effect: ~30% faster inference, ~45% less energy, 4× smaller model, at the cost of a very small accuracy drop (typically under 1%). For a solar-powered capsule this matters significantly — smaller model means less battery, smaller solar panel, lighter capsule. Apply using `torch.quantization` (PyTorch) or TensorFlow Lite before deployment.
 
