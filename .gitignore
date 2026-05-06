@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data — dataset files are too large for git
+data/raw/*
+!data/raw/.gitkeep
+
+# Weights & Biases
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db

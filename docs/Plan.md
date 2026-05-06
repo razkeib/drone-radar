@@ -24,6 +24,8 @@ In this project, we'll take a look at multiple solutions to multiple problems.
   Can work in bad weather, Cheap. Requires training a classification model for drones (the hard part). Creating a tower and RX/TX protocol to receive all microphones (may already exist).
 2. Microphone Array
   Image which shows where in the image the sound is coming from while looking in the direction (gives only 1 vector. should be paired with other detectors, if used)
+3. Parabolic Microphone - Can be spinned around to collect further noises and once locked on and then aimed to the drone direction to understand location of drone better
+4. Optical Fiber Controller - Using the optical fiber from enemy drones, we can pass some sort of light through it (maybe IR or Ultraviolet) to lead us to the drone operator. Has to be done as soon as the drone is neutralized.
 
 
 ## Neutralization:
@@ -32,6 +34,7 @@ In this project, we'll take a look at multiple solutions to multiple problems.
 2. RF-Jamming
   Can take down drones from far away and probably be activated at all times. Requires knowing enemy drone frequencies and is limited to remote-controlled drones.
 3. EMP (Electro Magnetic Pulse) - Sending an electro magnetic pulse in a specific direction. Can take down multiple drones at once. Very expensive to create, and requires high quality engineering. Has been created by US company "Epirus"
+4. Optical Fiber - If the drone is detected before the 
 
 
 # Plan
