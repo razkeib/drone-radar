@@ -88,9 +88,9 @@ Pipeline per audio clip:
 1. Load `.wav`, resample to 16 kHz mono (`librosa.load`)
 2. Band-pass filter: high-pass at 50 Hz, low-pass at 10 kHz (`scipy.signal.butter` + `sosfilt`)
 3. Normalize RMS amplitude to a fixed level (removes mic gain variation between sessions)
-4. Segment into 2-second windows with 50% overlap
+4. Segment into 1-second windows with 500 ms hop (50% overlap). 1 second is the minimum reliable window for YAMNet — it processes audio in 960 ms internal patches, so shorter clips degrade embedding quality. Train and infer on the same window size to avoid a mismatch.
 5. Compute mel spectrogram: `n_fft=1024`, `hop_length=512`, `n_mels=128`, convert to dB
-6. Compute MFCC: 40 coefficients
+6. Compute MFCC: 20 base coefficients + 20 delta (first derivative) = 40 total. Pure base MFCCs capture static spectral shape well for hovering drones, but real flight involves constant RPM adjustment, approach, recession, and passing — the delta captures the rate of spectral change across frames, which is informative for these dynamic cases. Delta-delta (second derivative) adds marginal gain here since the BiLSTM in Track B already models acceleration implicitly; omit it to keep dimensionality at 40. Compute delta with `librosa.feature.delta(mfcc, order=1)`.
 7. Return both as tensors
 
 Note for Track A: YAMNet takes raw waveform directly, not mel spectrogram. The mel spectrogram + MFCC pipeline is used in Track B. Write it now anyway — it will be needed and the preprocessing logic is the same.
@@ -192,7 +192,9 @@ Calibration procedure (done once per drone type when hardware arrives):
 
 ## Step 6 — Inference Loop (~3-4 hours)
 
-Write `src/detection/inference.py`. Reads audio from a file in sliding 2-second windows for now; swap in mic input once hardware arrives — the detection logic does not change.
+Write `src/detection/inference.py`. Reads audio from a file in sliding 1-second windows for now; swap in mic input once hardware arrives — the detection logic does not change.
+
+Latency profile: the buffer must fill for 1 second before the first prediction. After that, a new prediction fires every 500 ms (the hop). First detection latency ≈ 1 second; ongoing update rate = 500 ms.
 
 ```python
 import soundfile as sf
@@ -202,7 +204,7 @@ from src.distance.intensity_proxy import estimate_distance
 
 def run_on_file(audio_path, model, calibration_path, drone_type):
     waveform, sr = load_and_preprocess(audio_path)
-    windows = segment(waveform, window_s=2.0, hop_s=1.0, sr=sr)
+    windows = segment(waveform, window_s=1.0, hop_s=0.5, sr=sr)
 
     for i, window in enumerate(windows):
         prob = float(model.predict(window[np.newaxis, :])[0][0])
@@ -211,9 +213,9 @@ def run_on_file(audio_path, model, calibration_path, drone_type):
         if detected:
             rms = compute_rms(window)
             result = estimate_distance(rms, drone_type, calibration_path)
-            print(f"t={i}s | DRONE ({prob:.2f}) | {result['bracket']} ({result['distance_m']} m)")
+            print(f"t={i*0.5:.1f}s | DRONE ({prob:.2f}) | {result['bracket']} ({result['distance_m']} m)")
         else:
-            print(f"t={i}s | no drone ({prob:.2f})")
+            print(f"t={i*0.5:.1f}s | no drone ({prob:.2f})")
 ```
 
 When hardware arrives, add a real-time loop using `sounddevice.InputStream` feeding into the same `window → model.predict → estimate_distance` logic.

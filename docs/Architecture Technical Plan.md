@@ -37,6 +37,7 @@
 | Distance output format (Track A) | Distance brackets (0–50 m, 50–150 m, 150–300 m, >300 m) | Intensity proxy is too noisy for continuous estimation — brackets are the most honest output at this precision level |
 | Distance output format (Track B) | Continuous regression (meters) as primary output; bracket classification as secondary confidence check | GPS labels are already continuous values — converting them to brackets throws away information. Regression gives ±5–30 m accuracy depending on range, which is far more useful for triangulation than 100-m-wide brackets |
 | Metadata in training data | Label everything (wind speed, environment, noise sources) but do NOT feed as model input | Model should be robust *to* conditions via diverse training data, not informed *of* conditions at inference time. Labels are for dataset analysis and debugging, not model inputs. Exception: a wind sensor could be added post-POC to dynamically adjust detection threshold |
+| Mic hardware as model input | A 5-value feature vector `[mic_type, dish_diameter_cm, dish_depth_cm, dish_material, dish_wall_thickness_mm]` IS fed as a model input — specifically into the distance heads, not the classification head | Mic hardware is not an ambient condition; it is a known, deterministic property that systematically changes the acoustic signature. Each parameter captures a distinct physical effect: **`mic_type`** (int: 0=omni, 1=parabolic) is the primary flag. **`dish_diameter_cm`** (float, 0.0 for omni) encodes aperture size — gain scales roughly with D²×f², so a larger dish produces more total gain and a narrower beam, shifting the apparent loudness balance across harmonics. **`dish_depth_cm`** (float, 0.0 for omni) encodes bowl depth — determines focal length (f = D²/16d) and therefore the acceptance cone angle; a deeper dish focuses tightly (directional) while a shallower dish accepts sound from a wider cone. **`dish_material`** (int: 0=none, 1=metal, 2=mesh, 3=plastic/fiberglass) encodes reflectivity: metal reflects nearly perfectly; mesh has frequency-dependent transmission loss above the aperture frequency (passes sound where wavelength < aperture opening size); plastic/fiberglass introduces surface absorption and internal resonances at specific frequencies. **`dish_wall_thickness_mm`** (float, 0.0 for omni) encodes stiffness — a thin wall flexes under acoustic pressure and can resonate at its natural frequencies, absorbing and re-radiating energy at those frequencies, while a thick or rigid wall reflects cleanly without flexing. The combination of material + wall thickness determines the effective surface impedance and which frequencies are reflected vs absorbed. Without all five values the distance head silently averages over incompatible input distributions. Must be added from the start — retrofitting later requires full retraining on relabeled data. |
 | Track B training approach | Fine-tuning (not training from scratch) | Start from YAMNet's pretrained weights rather than random initialization — the backbone already knows how to listen. Fine-tuning all layers on your dataset converges faster, needs less data, and reaches better accuracy |
 | Multi-drone training | No — single drone per recording session for POC | Multi-source separation is a separate hard problem; triangulation handles multi-drone position |
 | Audio feature | [Mel Spectrogram](#mel-spectrogram) + [MFCC](#mfcc) fusion | Combining both consistently outperforms either alone in published literature |
@@ -295,12 +296,17 @@ Both are required. A model trained only on clean audio will fail in the field.
 - Record at many distances spread across the range, not just a few fixed points (e.g., 10, 20, 30, 50, 75, 100, 150, 200, 250, 300 m). The regression model needs a continuous spread to learn the distance-to-audio mapping — gaps in coverage create gaps in accuracy.
 - Label each clip with **both continuous and categorical metadata:**
   - `distance_m` — RTK-derived 3D distance in meters: $\sqrt{d_{horizontal\_RTK}^2 + \Delta h_{baro}^2}$ (primary training label for regression)
+  - `mic_type` — `omni_mems` or `parabolic` **(model input — not just a label; see Core Decisions)**. Encode as integer: 0 = MEMS omnidirectional, 1 = parabolic.
+  - `dish_diameter_cm` — **(model input)** aperture diameter of the parabolic dish in centimetres; `0.0` for MEMS. Re-measure if switching to a different dish.
+  - `dish_depth_cm` — **(model input)** physical depth of the bowl from rim plane to vertex in centimetres; `0.0` for MEMS. Determines focal length and acceptance cone width.
+  - `dish_material` — **(model input)** encode as integer: 0 = none (MEMS), 1 = metal, 2 = mesh, 3 = plastic/fiberglass. Controls reflectivity and transmission loss profile across frequencies.
+  - `dish_wall_thickness_mm` — **(model input)** wall thickness of the dish material in millimetres; `0.0` for MEMS. Thin walls flex and resonate at specific frequencies; thick or rigid walls reflect cleanly. Measure with a calliper — estimate is fine for POC.
   - `drone_type`, `behavior` (hover/approach/pass)
   - `environment` (open_field / urban / forest)
   - `wind_speed` (none / light / moderate / strong — estimate or measure with a phone anemometer app)
   - `noise_sources` (none / traffic / insects / people / machinery)
   - `time_of_day` (morning / afternoon / evening)
-- **These metadata labels are for dataset analysis and debugging, not model inputs.** After training, if the model fails in a specific condition (e.g., always wrong in high wind), these labels tell you exactly what's missing from your dataset. You then go record more of that condition.
+- **`mic_type` is the only label that is also a model input.** All other metadata labels are for dataset analysis and debugging only — if the model fails in a specific condition (e.g., always wrong in high wind), these labels tell you exactly what's missing from your dataset so you can go record more of that condition.
 - Clip length: 2–5 seconds each
 - Record at multiple times of day (morning ambient noise ≠ afternoon)
 - **Doppler effect:** When recording approaching/receding passes, pitch shifts higher on approach and lower on recession. This is real data — record many passes so the model learns that a pitch-shifted drone is still a drone.
@@ -321,13 +327,14 @@ Both are required. A model trained only on clean audio will fail in the field.
 1. **Load audio:** Read .wav, resample to 16 kHz if needed.
 2. **Band-pass filter:** High-pass at 50 Hz (captures shaft rate at ~64 Hz), low-pass at 10 kHz. Use `scipy.signal.butter`.
 3. **Normalize amplitude:** Scale to consistent RMS level. Removes mic gain variation between sessions.
-4. **Segment:** 1–2 second windows, 50% overlap. Each segment inherits its parent recording's label. This window size is the single largest contributor to end-to-end detection latency — see [End-to-End Latency Breakdown](#end-to-end-latency-breakdown).
-5. **Compute features — use both:**
+4. **Encode mic hardware feature vector:** Read the five mic hardware labels from the CSV and build a single float tensor `[mic_type, dish_diameter_cm, dish_depth_cm, dish_material, dish_wall_thickness_mm]`. Normalize the continuous values (`dish_diameter_cm`, `dish_depth_cm`, `dish_wall_thickness_mm`) to z-scores using training-set mean and std — this puts them on the same scale as the audio embedding dimensions. Keep the integer categoricals (`mic_type`, `dish_material`) as-is without normalization. This 5-element vector travels alongside the audio tensor through the entire pipeline and is concatenated to the 1024-dim YAMNet embedding before the distance heads (see Phase B4 architecture). Do not augment any of these values — they are fixed hardware properties for the recording session, not signal characteristics.
+5. **Segment:** 1–2 second windows, 50% overlap. Each segment inherits its parent recording's label including `mic_type`. This window size is the single largest contributor to end-to-end detection latency — see [End-to-End Latency Breakdown](#end-to-end-latency-breakdown).
+6. **Compute features — use both:**
    - **[Mel Spectrogram](#mel-spectrogram):** `n_fft=1024`, `hop_length=512`, `n_mels=128`, converted to dB. Output: `(128 × time_frames)`.
    - **[MFCC](#mfcc):** 40 coefficients, 240 ms window. Output: `(40 × time_frames)`.
    - Concatenate along the feature axis → fused input tensor.
-6. **Save** to `data/processed/` as `.pt` files with updated labels CSV.
-7. **Split by session:** 70% train / 15% validation / 15% test. Split by recording session, not by clip — splitting by clip leaks information since clips from the same session sound nearly identical.
+7. **Save** to `data/processed/` as `.pt` files with updated labels CSV. Each `.pt` file stores a tuple of `(audio_tensor, mic_type_int, distance_m, drone_class)`.
+8. **Split by session:** 70% train / 15% validation / 15% test. Split by recording session, not by clip — splitting by clip leaks information since clips from the same session sound nearly identical. Verify the split contains both `mic_type` values in train, val, and test — if all parabolic recordings land in one split, the model cannot generalize.
 
 **Checkpoint:** Run the pipeline on 10 clips. Inspect spectrograms: a hovering drone should show clear horizontal harmonic bands. A wind clip should show mostly low-frequency uniform energy.
 
@@ -359,15 +366,24 @@ For triangulation: three mics each with ±20 m estimates produce an intersection
 [YAMNet](#yamnet) [backbone](#model-backbone) ([fine-tuned](#fine-tuning) from AudioSet pretraining), with three output [heads](#model-backbone):
 
 ```
-Input: Fused Mel Spectrogram + MFCC tensor
+Input A: Fused Mel Spectrogram + MFCC tensor
   → YAMNet backbone (pretrained on AudioSet, fine-tune all layers)
   → 1024-dim audio embedding
+  │
   ├── Head 1: Dense(256) → ReLU → Dense(N_classes) → Softmax    [classification: drone type]
+  │     └── uses audio embedding only — mic hardware does not affect drone classification
+  │
+Input B: mic hardware vector [mic_type, dish_diameter_cm, dish_depth_cm, dish_material, dish_wall_thickness_mm]
+  → normalized continuous values (diameter, depth, thickness) z-scored to training-set stats
+  → concatenated to audio embedding → 1029-dim combined vector
+  │
   ├── Head 2: CNN-BiLSTM → Dense(256) → ReLU → Linear(1)        [distance regression: meters]
   └── Head 3: Dense(256) → ReLU → Dense(4) → Softmax            [distance bracket: confidence check]
 ```
 
-Head 2 and Head 3 both predict distance from the same embedding. If they agree, the estimate is trustworthy. If they disagree strongly, flag the output as low-confidence.
+Head 2 and Head 3 both predict distance from the combined 1029-dim vector. Head 1 (classification) uses only the 1024-dim audio embedding — mic hardware is irrelevant to whether the sound is a drone.
+
+**Why mic hardware goes into distance heads only:** The parabolic dish applies frequency-dependent gain that varies with diameter, depth, material, and wall thickness — the same drone at the same distance sounds measurably different through each hardware combination. The distance head must know the hardware to interpret loudness correctly. The classification head is unaffected because harmonic structure (the classification feature) is preserved by the dish; only amplitude and frequency balance change.
 
 The [CNN-BiLSTM](#cnn-bilstm) in Head 2 adds temporal reasoning — it reads how the signal evolves across multiple frames (getting louder = drone approaching, fading = receding). This temporal pattern is a strong distance cue that a static single-frame [CNN](#cnn) misses entirely.
 
@@ -375,10 +391,10 @@ The [CNN-BiLSTM](#cnn-bilstm) in Head 2 adds temporal reasoning — it reads how
 
 #### Training order
 
-1. **Binary classifier only (drone vs not-drone):** achieve >90% F1 before moving on. Use class-weighted loss if your not-drone class is larger.
-2. **Add drone type classification:** expand to multi-class. Evaluate per-class precision/recall.
-3. **Add distance heads:** train both Head 2 (regression) and Head 3 (bracket) simultaneously. Loss: `total_loss = classification_loss + λ₁ × MAE_regression + λ₂ × bracket_crossentropy`. Use [Huber Loss](#huber-loss) instead of plain [MAE](#mae) — it is less sensitive to outlier clips where GPS had a bad fix. Start with λ₁=0.5, λ₂=0.3.
-4. **[Quantize](#model-quantization):** apply INT8 quantization once validated. Reduces inference time ~30% and energy ~45%.
+1. **Binary classifier only (drone vs not-drone):** achieve >90% F1 before moving on. Use class-weighted loss if your not-drone class is larger. `mic_type` is not yet wired in at this stage — the classifier doesn't use it.
+2. **Add drone type classification:** expand to multi-class. Evaluate per-class precision/recall. Still no `mic_type` input needed.
+3. **Add distance heads with mic_type:** train both Head 2 (regression) and Head 3 (bracket) simultaneously, now with the 1025-dim combined vector (audio embedding + `mic_type` scalar). Loss: `total_loss = classification_loss + λ₁ × huber_regression + λ₂ × bracket_crossentropy`. Use [Huber Loss](#huber-loss) instead of plain [MAE](#mae) — it is less sensitive to outlier clips where GPS had a bad fix. Start with λ₁=0.5, λ₂=0.3. **Verify that `mic_type` is making a difference:** after training, compare distance MAE on MEMS-only clips vs parabolic-only clips — if they're similar, the head is correctly learning separate distance mappings for each mic type.
+4. **[Quantize](#model-quantization):** apply INT8 quantization once validated. Reduces inference time ~30% and energy ~45%. The `mic_type` scalar input is unaffected by quantization — it is passed as a full integer at inference time.
 
 #### Key metrics
 - Classification: Precision, Recall, F1 (prioritize Recall — a missed drone is worse than a false alarm)
@@ -545,10 +561,44 @@ Layer 2 (parabolic + camera) points and runs YAMNet on focused signal
 Ground-level machinery and personnel sound sources arrive from the horizontal plane. A skyward-pointing directional array rejects these through three stacked mechanisms:
 
 1. **Beam spatial filter (electronic):** beamforming attenuates signals arriving from outside the steering direction. Ground-level noise arrives at a large off-axis angle relative to a sky-pointing beam — it is suppressed electronically.
-2. **Physical baffle (passive):** dense sound-blocking material (mass-loaded vinyl, or a solid backing plate with acoustic foam) mounted on the rear face of the array prevents rear-hemisphere noise from diffracting around to the microphones. Standard practice in outdoor acoustic camera systems.
+2. **Physical baffle (passive):** dense sound-blocking material mounted on the rear face of the array prevents rear-hemisphere noise from diffracting around to the microphones. Standard practice in outdoor acoustic camera systems. See **Acoustic Backing Materials** subsection below for options.
 3. **Frequency-domain notch filter:** machinery harmonics at known fixed frequencies (e.g., diesel generator at 50/100/150 Hz) can be notch-filtered in software without significantly affecting drone harmonic detection above 200 Hz.
 
 **Practical ceiling:** broadband machinery noise still partially overlaps the drone harmonic band (100–1000 Hz). At very high noise levels, raise the detection confidence threshold — this trades some recall for false-positive reduction. The directional approach substantially reduces this problem; it does not fully eliminate it at extreme noise levels. If the system must operate at very close range to loud machinery, physical separation of even 20–30 m makes a significant difference.
+
+#### Acoustic Backing Materials
+
+For environments with intense background noise — loud machinery, construction equipment (CATs), armored vehicles, tanks — backing the microphone array or parabolic dish with sound-blocking material substantially improves SNR. The goal is to stop rear-hemisphere noise from diffracting around the array or dish and reaching the microphone capsule.
+
+**Option A — Mass-Loaded Vinyl (MLV) + Rockwool (recommended for stationary installations)**
+
+MLV and rockwool are complementary: MLV is a dense, limp barrier that blocks low-frequency sound transmission (the primary threat from engines, diesel machinery, and armored vehicles — 50–300 Hz); rockwool (mineral wool) absorbs mid-to-high frequency energy (200 Hz – several kHz). Used alone, MLV transmits rather than absorbs; rockwool alone lets low frequencies pass. Layered together — rockwool layer against the array back, MLV layer on the outside — they provide broadband attenuation across the full drone harmonic band (50 Hz – 2 kHz).
+
+- **MLV spec:** 2 lb/ft² (3–4 mm thick) achieves STC 31 on its own. Use mass-loaded vinyl, not standard acoustic foam — foam absorbs, MLV blocks.
+- **Rockwool spec:** 50–100 mm thickness, high-density (60–100 kg/m³). Thicker is better for low-frequency absorption but adds weight.
+- **Application for flat arrays:** cut MLV and rockwool panels to cover the full rear face. Attach rockwool directly to the back plate with adhesive, then MLV over it, then weatherproof cover (neoprene sheet or outdoor-rated fabric). For parabolic dishes, wrap the rear (non-reflecting) face of the dish with the same sandwich — the reflective front face must remain clear.
+- **Weight:** ~1 lb/ft² for MLV + ~0.5 lb/ft² for 50 mm rockwool = ~1.5 lb/ft² total. A 0.5 m × 0.5 m backing panel adds ~0.35 kg (~0.8 lb) — manageable for stationary command-post units, heavy for field-deployed capsules.
+
+**Option B — Solid rigid plate + acoustic foam (lightweight alternative for mobile capsules)**
+
+A solid plate (steel, aluminium, or hard plastic) provides broadband reflection loss; a thin layer of closed-cell acoustic foam on the interior face absorbs the small fraction that transmits. This is lighter and more ruggedized than Option A but provides less low-frequency attenuation (steel plate STC ~25 vs MLV+rockwool ~35+).
+
+Use this for field-deployed capsules where weight and packaging size matter. The directional beam pattern already rejects most ground-level noise electronically — the rigid plate handles the remainder.
+
+**Option C — Active noise cancellation (post-POC, extreme environments)**
+
+For operations at very close range to continuous high-intensity noise sources (idling tanks, active generators), passive materials alone may be insufficient. Add a reference microphone on the rear face of the array (pointed away from the sky, toward the noise source), and run a digital ANC algorithm that subtracts the reference signal from the main mics. The U.S. Navy has funded ANC development specifically for boom microphone applications in high-noise environments. This adds compute and tuning complexity — save for post-POC if passive options prove insufficient.
+
+| Option | Best for | Low-freq attenuation | Weight | Complexity |
+|---|---|---|---|---|
+| MLV + Rockwool | Fixed command-post arrays, parabolic dish rear faces | High (STC 35+) | ~1.5 lb/ft² | Low |
+| Rigid plate + foam | Field-deployed capsules, mobile setups | Medium (STC ~25) | ~0.5–1 lb/ft² | Very low |
+| Active noise cancellation | Extreme noise, very close to source | Very high (30–40 dB broadband) | Minimal hardware, high compute | High |
+
+**Placement notes:**
+- On **flat MEMS arrays**: cover the full rear face. Leave the forward-facing microphone apertures completely unobstructed.
+- On **parabolic dishes**: wrap the non-reflecting rear hemisphere of the dish only — never cover the reflective bowl or focal-point area. For the parabolic mic in the Layer 2 pan-tilt unit, attach backing material to the dish back plate and the pan-tilt arm structure behind the focal point.
+- On **omnidirectional MEMS capsules (Phase 5 ground deployment)**: a rigid backing disc underneath the capsule, or a short cylindrical shroud with backing material on the bottom and sides below the horizontal plane, prevents upward-reflected ground noise from entering the microphone from below.
 
 ---
 
@@ -618,9 +668,41 @@ With 50% overlap (the Phase B3 default), a new inference fires every 1 second. W
 | Edge inference (Architecture A) | Eliminates radio transmission hop | No WiFi/serial delay on the detection path |
 | VAD gating (optional) | Skips preprocessing on silent frames | ESP32-S3 runs a simple energy threshold before streaming to the Pi; reduces average latency and radio bandwidth without changing worst-case. Only useful in Architecture B where audio is streamed rather than processed locally |
 
+### Training Window vs Inference Window
+
+**The short answer: train on the same window size you plan to use at inference — especially for the distance heads.**
+
+**Why it matters:**
+
+The mel spectrogram fed to the CNN backbone has shape `(128 mel bins × T time frames)`. The number of time frames T scales directly with window length: a 2 s window at hop_length=512 gives ~62 frames; a 500 ms window gives ~15 frames. A CNN trained on `(128×62)` spectrograms cannot directly process `(128×15)` spectrograms — the spatial shape is different and the learned convolutional filters don't map across.
+
+**YAMNet specifically:** YAMNet's internal fixed frame is 960 ms. If you pass a shorter clip (e.g. 500 ms), the TensorFlow Hub implementation zero-pads the remaining ~460 ms with silence. This works for inference without retraining — the embedding is still produced — but the model was never trained on padded inputs, so the embedding quality degrades and classification accuracy drops noticeably (~5–15% in practice). The classification head tolerates this degradation reasonably well because harmonic structure is still visible in 500 ms. The BiLSTM distance head does not tolerate it — the temporal patterns it learned (signal building over 1.5 s = approaching drone) are simply absent in 500 ms padded clips.
+
+**Per-head summary:**
+
+| Head | Sensitive to window size mismatch? | Why |
+|---|---|---|
+| Head 1 — classification (drone type) | Tolerates mismatch with small accuracy cost | Harmonic structure is visible even in 500 ms; zero-padding adds silence, not noise |
+| Head 2 — distance regression (BiLSTM) | Sensitive — retrain required for a different window | BiLSTM learns temporal patterns (approach/fade over multiple seconds); these patterns do not exist in short or padded clips |
+| Head 3 — distance bracket (sanity check) | Moderately sensitive | Same temporal dependency as Head 2 but less precise, so degradation is less catastrophic |
+
+**Recommendation — decide before collecting training data:**
+
+Choose your target inference window size first, then collect training data and train on that exact window. The options:
+
+| Window | Detection latency | Classification accuracy | Distance accuracy | Notes |
+|---|---|---|---|---|
+| **500 ms** | ~750 ms worst-case | ~85–90% of 2 s baseline | Reduced — BiLSTM has little temporal context | Acceptable for classification-only use; distance estimates less reliable |
+| **1 s** | ~1.5 s worst-case | ~95% of 2 s baseline | Good | **Recommended default** — good balance of latency and accuracy |
+| **2 s** | ~3 s worst-case | Baseline | Best | Published literature standard; use if latency is not a constraint |
+
+**If you need both low latency and good distance accuracy:** train on 500 ms windows but aggregate consecutive predictions. Run inference every 250 ms (75% overlap) and take the median of the last 4 distance estimates — this gives you a 1 s effective temporal window while keeping detection latency at ~500 ms.
+
+**Physics floor on minimum window:** The drone BPF at 128 Hz has a cycle time of ~8 ms. To see a recognizable harmonic pattern in a mel spectrogram you need at least 10–20 cycles = 80–160 ms. In practice, the neural network needs more statistical averaging to be confident — 500 ms is the empirically validated minimum. Below 300 ms, false positive rates rise sharply and detection at range degrades severely.
+
 ### Is This a Problem?
 
-For a drone threat scenario, 1–3 seconds of detection latency is operationally acceptable — drones move slowly enough that this doesn't change the response window meaningfully. The latency floor is set by physics (acoustic capture time), not by software or hardware choices.
+For a drone threat scenario, 1–3 seconds of detection latency is operationally acceptable — drones move slowly enough that this doesn't change the response window meaningfully. The latency floor is set by physics (acoustic capture time), not by software or hardware choices. If you decide to use 500 ms windows to cut latency, plan for it from day one of data collection — do not retrain later.
 
 ---
 
